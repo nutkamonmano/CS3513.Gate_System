@@ -47,7 +47,7 @@ def get_thai_license_plate_from_video(video_path):
                     detected_classes.append(clsname)
         
         # จัดเรียงตัวอักษรบนป้ายทะเบียน
-        #print(detected_classes)
+        print(detected_classes)
         for item in detected_classes:
             if item in data_province:
                 detected_classes.remove(item)
@@ -56,8 +56,7 @@ def get_thai_license_plate_from_video(video_path):
         combined_text = "".join(get_thai_character(newval) for newval in detected_classes)
         license_plate, province = split_license_plate_and_province(combined_text)
         print("ทะเบียนรถ:", license_plate ,"จังหวัด:", province)
-  
-        
+
         # แสดงเฟรมพร้อมการตรวจจับ
         cv2.imshow("License Plate Detection", frame)
         

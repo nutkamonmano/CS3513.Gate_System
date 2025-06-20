@@ -2,71 +2,81 @@ import cv2
 import paho.mqtt.client as mqtt
 from ultralytics import YOLO
 from function.helper import get_thai_character, data_province, split_license_plate_and_province
+from datetime import datetime 
+import time
+
+
+import mysql.connector
 
 # Load models
-vehicle_model = YOLO("model/license_plate.pt")  # Vehicle detection model
-plate_model = YOLO("model/data_plate.pt")  # License plate detection model
+vehicle_model = YOLO("model/license_plate.pt")
+plate_model = YOLO("model/data_plate.pt")
 print(plate_model.names)
 
 # MQTT Configuration
-MQTT_BROKER = "YOUR_IP_ADDRESS"  # Replace with your MQTT broker IP address
+#MQTT_BROKER = "172.20.10.2"
+MQTT_BROKER = "192.168.0.101"
 MQTT_PORT = 1883
-MQTT_TOPIC = "license_plate/detection" # Topic to publish license plate data ใช้ topic ตามนี้ใน node-red
+MQTT_TOPIC = "license_plate/detection"
+
+# MySQL Configuration
+db = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="",
+    database="barriergate"
+)
+cursor = db.cursor()
 
 # Initialize MQTT Client
-client = mqtt.Client()
-client.on_connect = lambda client, userdata, flags, rc: print("Connected with result code", rc)
+client = mqtt.Client() 
+client.on_connect = lambda client, userdata, flags, rc, properties=None: print("Connected with reason code", rc)
 client.connect(MQTT_BROKER, MQTT_PORT, 60)
-client.loop_start()  # Start MQTT loop
+client.loop_start()
 
-# เก็บทะเบียนที่ส่งไปแล้ว
 sent_plates = set()
 
-def get_thai_license_plate_from_video(video_path):
-    cap = cv2.VideoCapture(video_path)
-    
-    while cap.isOpened():
+def get_thai_license_plate_from_rtsp(rtsp_url):
+    cap = cv2.VideoCapture(rtsp_url)
+
+    if not cap.isOpened():
+        print("❌ Failed to open RTSP stream")
+        return
+
+    while True:
         ret, frame = cap.read()
         if not ret:
-            break
+            print("❌ Failed to read frame from RTSP")
+            time.sleep(1)
+            continue
+
         frame = cv2.resize(frame, (1280, 720))
-
-        # Detect vehicles
         vehicle_results = vehicle_model(frame, conf=0.3, verbose=False)
-        if not vehicle_results:
-            continue  # Skip if no vehicles detected
-
         detected_classes = []
-        
+
         for result in vehicle_results:
             for box in result.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green = vehicle
-                
-                # Crop vehicle region
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 car_roi = frame[y1:y2, x1:x2]
                 plate_results = plate_model(car_roi, conf=0.3, verbose=False)
-                if not plate_results:
-                    continue  # Skip if no plates detected
-
                 plates = []
                 for plate in plate_results:
                     for plate_box in plate.boxes:
                         px1, py1, px2, py2 = map(int, plate_box.xyxy[0])
-                        px1, px2 = px1 + x1, px2 + x1
-                        py1, py2 = py1 + y1, py2 + y1
+                        px1 += x1
+                        px2 += x1
+                        py1 += y1
+                        py2 += y1
                         plates.append((px1, plate_box.cls, (px1, py1, px2, py2)))
 
-                # Sort plates by X coordinate
                 plates.sort(key=lambda x: x[0])
-                
                 for plate in plates:
                     px1, cls, (x1_plate, y1_plate, x2_plate, y2_plate) = plate
-                    cv2.rectangle(frame, (x1_plate, y1_plate), (x2_plate, y2_plate), (255, 255, 0), 2)  # Blue = license plate
+                    cv2.rectangle(frame, (x1_plate, y1_plate), (x2_plate, y2_plate), (255, 255, 0), 2)
                     clsname = plate_model.names[int(cls)]
                     detected_classes.append(clsname)
 
-        # Process detected characters
         for item in detected_classes:
             if item in data_province:
                 detected_classes.remove(item)
@@ -76,22 +86,51 @@ def get_thai_license_plate_from_video(video_path):
         license_plate, province = split_license_plate_and_province(combined_text)
         print("ทะเบียนรถ:", license_plate, "จังหวัด:", province)
 
-        # ส่ง MQTT เฉพาะทะเบียนที่ยังไม่เคยส่ง
-        if license_plate and province and license_plate not in sent_plates:
-            data = f'{{"license_plate": "{license_plate}", "province": "{province}"}}'
-            client.publish(MQTT_TOPIC, data)
-            print("✅ ส่งข้อมูลไป MQTT:", data)
-            sent_plates.add(license_plate)  # บันทึกว่าทะเบียนนี้ส่งแล้ว
 
-        # Show frame
-        cv2.imshow("License Plate Detection", frame)
+        if license_plate and province and license_plate not in sent_plates:
+             # ตรวจสอบทะเบียนในฐานข้อมูล
+            query = "SELECT car_registration, province FROM car WHERE car_registration = %s AND province = %s"
+            cursor.execute(query, (license_plate, province))
+            result = cursor.fetchone()
+
+            date = datetime.now().strftime("%Y-%m-%d ")
+            time_now = datetime.now().strftime("%H:%M:%S")
+            
+            if result:
+
+                data = f"ทะเบียนรถ : {license_plate} \n จังหวัด : {province} \n {date} \n {time_now} "
+                print("ข้อมูลทะเบียนรถ:", data)
+                
+                print("✅ พบทะเบียนในระบบ:", result)
+                print("✅ ส่งข้อมูลไป MQTT:", data)
+                client.publish(MQTT_TOPIC, data)
+                sent_plates.add(license_plate)
+
+            else:
+                data = f"ทะเบียนรถ : {license_plate} \n จังหวัด : {province} \n {date} \n {time_now} "
+                print("❌ ไม่พบทะเบียนในระบบ")
+                client.publish(MQTT_TOPIC, data)
+    
+
         
+    
+
+        cv2.imshow("License Plate Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
 
     cap.release()
     cv2.destroyAllWindows()
     client.disconnect()
+             
+# Run
+def main():
+    rtsp_url = "rtsp://admin:99999999@192.168.0.199:10554/udp/av0_0"
+    get_thai_license_plate_from_rtsp(rtsp_url)
+   
 
-# Run function
-get_thai_license_plate_from_video("video/video1.avi")
+if __name__ == "__main__":
+    main()
+#get_thai_license_plate_from_rtsp("video/video1.avi")
+time.sleep(3)
